@@ -1,4 +1,3 @@
-__author__ = 'solid'
 import os
 import urllib2
 import zipfile
@@ -79,7 +78,7 @@ def readManifestFile():
             pass
 
 
-    # print fileList
+    print fileList
     # listFile(fileList)
     return fileList
 
@@ -87,23 +86,72 @@ def readManifestFile():
 
 
 
-def downloadFile(file_url):
+def downloadFile(file_url, savePath, fileSize=-1, deleteOldFile = False):
     print "download: ", file_url
 
-    send_headers = {
-        'User-Agent':'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:40.0) Gecko/20100101 Firefox/40.0',
-        'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3',
-        'Accept-Encoding': 'gzip, deflate',
-        'Connection':'keep-alive'
-    }
-    r = requests.get(file_url, verify=True, headers=send_headers)
-    if r.status_code == 200:
-        data = r.content
-        return data
-    else:
-        print r.status_code
-        return None
+    savePath = os.path.join(DOWNLOAD_DIR, savePath)
+
+    if deleteOldFile and os.path.exists(savePath):
+        os.remove(savePath)
+
+
+    tmpFilePath = savePath+".tmp"
+    currentSize  = 0
+    if os.path.exists(tmpFilePath):
+        currentSize =  os.path.getsize(tmpFilePath)
+
+    fd = openTmpFile(tmpFilePath)
+
+    downloadBlockSize = 2048
+
+    while True:
+        offset = currentSize
+        if fileSize  == -1:
+            size = 1
+        else:
+            leftSize = fileSize - currentSize
+            if leftSize == 0:
+                break
+            if leftSize > downloadBlockSize:
+                size = downloadBlockSize
+            else:
+                size = leftSize
+
+        send_headers = {
+            'User-Agent':'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:40.0) Gecko/20100101 Firefox/40.0',
+            'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection':'keep-alive',
+            "Range":"bytes=%d-%d"%(offset, offset+size-1)
+        }
+
+        # print send_headers
+        try:
+            r = requests.get(file_url, verify=True, headers=send_headers, stream=True)
+            if r.status_code == 200:
+                data = r.content
+                # print r.headers
+            else:
+                # print r.status_code
+                # print r.headers
+                contentRange = r.headers.get('Content-Range')
+                if not contentRange:
+                    break
+                fileSize = int(contentRange.split("/")[-1])
+                # print "got file size = ", fileSize
+                fd.write(r.content)
+                fd.flush()
+                currentSize += size
+
+        except Exception, e:
+            print e
+            pass
+
+    fd.close()
+    os.rename(tmpFilePath, savePath)
+
+    print file_url, "  done"
 
 
 
@@ -115,7 +163,7 @@ def needDownLoadFile(fileDir, size):
 
     if os.path.exists(filePath):
         fsize = os.path.getsize(filePath)
-        #print filePath, "size:", fsize, "need:", size,
+        # print filePath, "size:", fsize, "need:", size,
         if size == fsize:
             #print "not need to download"
             return False
@@ -125,6 +173,16 @@ def needDownLoadFile(fileDir, size):
 
     return True
 
+def openTmpFile(tmpFilePath):
+    # filePath = os.path.join(DOWNLOAD_DIR, tmpFilePath)
+    # if not os.path.exists(DOWNLOAD_DIR):
+    #     os.mkdir(DOWNLOAD_DIR)
+
+    path = os.path.split(tmpFilePath)[0]
+    if not os.path.exists(path):
+        os.makedirs(path)
+    fd = open(tmpFilePath, "ab")
+    return fd
 
 
 def saveFile(fileDir, data):
@@ -146,9 +204,9 @@ def saveFile(fileDir, data):
 def getConfigureFile():
     file_url = "%s/%s"%(GIT_RESOURCE_URL, GIT_CFG_FILE)
 
-    data = downloadFile(file_url)
+    downloadFile(file_url, GIT_CFG_FILE, deleteOldFile=True)
     print "configure file done"
-    saveFile(GIT_CFG_FILE, data)
+    # saveFile(GIT_CFG_FILE, data)
 
 def parseConfigureFile():
 
@@ -169,31 +227,30 @@ def getManifestFile():
     file_url = os.path.join(GIT_RESOURCE_URL, GIT_VERSION_DIR, GIT_MANIFEST_FILE)
     file_url = file_url.replace("\\", "/")
     print file_url
+    manifestDir = "%s\%s" % (GIT_VERSION_DIR, GIT_MANIFEST_FILE)
+    downloadFile(file_url, manifestDir, deleteOldFile=True)
 
-    data = downloadFile(file_url)
-    manifestDir = "%s\%s"%(GIT_VERSION_DIR, GIT_MANIFEST_FILE)
-    saveFile(manifestDir, data)
+    # saveFile(manifestDir, data)
 
 
 
 def collecter(work_queue):
+    # print "collecter"
     while True:
         work = work_queue.get()
         name, data_size = work
         #print name, data_size
         if needDownLoadFile(name, int(data_size)):
             fileUrl = "%s/%s/%s.deploy"%(GIT_RESOURCE_URL, GIT_VERSION_DIR, name)
-
+            fileUrl = fileUrl.replace("\\", "/")
             while True:
-                data = downloadFile(fileUrl)
-                if data and len(data) == int(data_size):
-                    savePath = os.path.join(GIT_VERSION_DIR, name+".deploy")
-                    saveFile(savePath, data)
-                    work_queue.task_done()
-                    break
+                savePath = os.path.join(GIT_VERSION_DIR, name + ".deploy")
+                downloadFile(fileUrl, savePath)
+                work_queue.task_done()
+                break
 
 
-if __name__ == "__main__":
+def run():
     getConfigureFile()
     parseConfigureFile()
     getManifestFile()
@@ -208,22 +265,21 @@ if __name__ == "__main__":
         name, data_size = fileInfo
         if needDownLoadFile(name, int(data_size)):
             # print name, float(data_size)/1024/102
-            fileUrl = "%s/%s/%s.deploy"%(GIT_RESOURCE_URL, GIT_VERSION_DIR, name)
+            fileUrl = "%s/%s/%s.deploy" % (GIT_RESOURCE_URL, GIT_VERSION_DIR, name)
             print fileUrl.replace("\\", "/")
             sizeLeft += float(data_size)
             work_queue.put(fileInfo)
 
-    print "total size:", sizeLeft/1024/1024
-
+    print "total size:", sizeLeft / 1024 / 1024
 
     for i in range(20):
-        tsk = threading.Thread(target=collecter, args=(work_queue, ))
+        tsk = threading.Thread(target=collecter, args=(work_queue,))
         tsk.start()
-
 
     work_queue.join()
     print "done xxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 
-    #
-    # zip_dir("./Application Files/GitHub_2_5_2_2", "tesss.zip")
+if __name__ == "__main__":
+    run()
+
